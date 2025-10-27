@@ -3,7 +3,7 @@
 [![Maven Central](https://img.shields.io/maven-central/v/com.firefly/lib-common-backoffice.svg)](https://search.maven.org/artifact/com.firefly/lib-common-backoffice)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A Spring Boot library that extends the Firefly application layer architecture for internal backoffice and portal systems with **customer impersonation**, **audit trail**, and **enhanced security context management**.
+A Spring Boot library that extends the Firefly application layer architecture for internal backoffice and portal systems with **customer impersonation**, **audit logging**, and **enhanced security context management**.
 
 ## Overview
 
@@ -11,10 +11,10 @@ The `lib-common-backoffice` library provides a secure and auditable way for back
 
 ### Key Features
 
-- **Customer Impersonation**: Backoffice users can securely access customer data while maintaining clear audit trails
+- **Customer Impersonation**: Backoffice users can securely access customer data with tracked impersonation context
 - **Dual Context Management**: Tracks both the actual backoffice user and the impersonated customer
 - **Security Validation**: Validates customer has rights to the requested contract and product via Security Center
-- **Audit Trail**: Comprehensive logging of all impersonation requests (who, when, why, from where)
+- **Audit Logging**: Structured logging of impersonation operations (who, when, why, from where) via SLF4J
 - **Istio Integration**: Seamless authentication through Istio service mesh (JWT validation + header injection)
 - **Role-Based Access**: Supports backoffice-specific roles (admin, support, analyst, auditor)
 
@@ -36,12 +36,12 @@ The `lib-common-backoffice` library provides a secure and auditable way for back
                           ┌──────────────────────────────────────────┐
                           │ BackofficeContextResolver                │
                           │                                          │
-                          │ 1. Extract backoffice user from headers  │
-                          │ 2. Extract impersonated party            │
-                          │ 3. Validate customer access via          │
-                          │    Security Center (contract/product)    │
-                          │ 4. Enrich with roles & permissions       │
-                          │ 5. Create audit trail                    │
+│ 1. Extract backoffice user from headers  │
+│ 2. Extract impersonated party            │
+│ 3. Validate customer access via          │
+│    Security Center (contract/product)    │
+│ 4. Enrich with roles & permissions       │
+│ 5. Build impersonation context           │
                           └──────────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@ The `lib-common-backoffice` library provides a secure and auditable way for back
 1. **Authentication**: Handled by Istio (validates backoffice JWT, injects `X-User-Id`)
 2. **Impersonation Headers**: Trusted from authenticated backoffice channels (`X-Impersonate-Party-Id`)
 3. **Authorization**: Security Center validates customer has rights to contract/product
-4. **Audit**: All impersonation requests logged with full context
+4. **Logging**: Impersonation operations logged via SLF4J with full context
 
 ## Installation
 
@@ -136,7 +136,7 @@ public class BackofficeAccountController extends AbstractBackofficeResourceContr
 - Full context resolution (backoffice user + customer)
 - Automatic party ID validation
 - Customer access rights verification
-- Comprehensive audit logging
+- Structured impersonation logging via SLF4J
 - Permission and role checking helpers
 
 ### Manual Controller Example (Without Abstract Base)
@@ -190,7 +190,7 @@ public class AccountService {
     private final AccountRepository accountRepository;
 
     public Mono<List<AccountDTO>> getAccountsForCustomer(BackofficeContext context) {
-        // Log for audit trail
+        // Log impersonation operation
         log.info("Backoffice user {} accessing accounts for customer {} in contract {}",
                 context.getBackofficeUserId(),
                 context.getImpersonatedPartyId(),
@@ -224,9 +224,9 @@ Immutable context containing:
 - `backofficePermissions`: Permissions derived from roles
 - `impersonatedPartyRoles`: Customer's roles (informational)
 - `impersonatedPartyPermissions`: Customer's permissions (informational)
-- `impersonationStartedAt`: Timestamp for audit
+- `impersonationStartedAt`: Timestamp when impersonation context was created
 - `impersonationReason`: Optional reason for accessing customer data
-- `backofficeUserIpAddress`: IP address for audit trail
+- `backofficeUserIpAddress`: IP address of the backoffice user
 
 **Methods:**
 
@@ -274,6 +274,20 @@ Mono<Boolean> validateImpersonationPermission(
     ServerWebExchange exchange);
 ```
 
+### BackofficeSecurityContext
+
+Immutable security context for advanced authorization scenarios. Contains:
+
+- `endpoint`: The endpoint being accessed
+- `httpMethod`: HTTP method (GET, POST, etc.)
+- `requiredBackofficeRoles`: Roles required for this endpoint
+- `requiredBackofficePermissions`: Permissions required
+- `impersonationAllowed`: Whether impersonation is allowed
+- `authorized`: Authorization result
+- `ImpersonationAuditTrail`: Nested data structure for audit metadata
+
+**Note**: This is a data structure for security metadata. The `ImpersonationAuditTrail` nested class provides fields to store audit information (userId, timestamp, reason, IP, etc.) but does not automatically persist this data. See the [Audit Logging](#audit-logging) section for implementation details.
+
 ### BackofficeSessionContextMapper
 
 Utility for extracting backoffice roles and permissions from Security Center sessions.
@@ -317,7 +331,7 @@ The library integrates with Firefly Security Center to:
 
 1. **Validate Customer Access**: Ensures the impersonated customer has active contracts/products
 2. **Fetch Roles & Permissions**: Retrieves both backoffice and customer roles/permissions
-3. **Audit Impersonation**: Logs all access attempts for compliance
+3. **Session Validation**: Verifies customer sessions and context associations
 
 ### Validation Logic
 
@@ -353,6 +367,82 @@ Examples:
 - `transactions:read`: View transaction history
 - `transactions:write`: Create/modify transactions
 - `system:admin`: Administrative operations
+
+## Audit Logging
+
+### What's Included
+
+The library provides **structured logging** of impersonation operations via SLF4J:
+
+- **Log Format**: `[Backoffice Impersonation] Backoffice User: {userId}, Impersonated Customer: {customerId}, Contract: {contractId}, Product: {productId}, Operation: {operation}, Reason: {reason}`
+- **Log Level**: INFO
+- **Location**: Available in the abstract controllers via `logImpersonationOperation()` method
+
+### What's NOT Included
+
+This library does **not** provide:
+
+- ❌ Persistent audit storage (no database writes)
+- ❌ Audit event publishing (no event bus integration)
+- ❌ Audit querying/reporting APIs
+- ❌ Compliance report generation
+
+### Implementing Persistent Audit Trail
+
+To add persistent audit storage, implement your own audit service:
+
+```java
+@Service
+public class AuditService {
+    
+    @Autowired
+    private AuditRepository auditRepository;
+    
+    public void logImpersonation(BackofficeContext context, String operation) {
+        AuditRecord record = AuditRecord.builder()
+            .backofficeUserId(context.getBackofficeUserId())
+            .impersonatedPartyId(context.getImpersonatedPartyId())
+            .contractId(context.getContractId())
+            .productId(context.getProductId())
+            .operation(operation)
+            .reason(context.getImpersonationReason())
+            .ipAddress(context.getBackofficeUserIpAddress())
+            .timestamp(Instant.now())
+            .build();
+        
+        auditRepository.save(record).subscribe();
+    }
+}
+```
+
+Then use it in your controllers:
+
+```java
+@RestController
+public class MyBackofficeController extends AbstractBackofficeResourceController {
+    
+    @Autowired
+    private AuditService auditService;
+    
+    @GetMapping("/customers/{partyId}/accounts")
+    public Mono<List<AccountDTO>> getAccounts(
+            @PathVariable UUID partyId,
+            @PathVariable UUID contractId,
+            ServerWebExchange exchange) {
+        
+        return resolveBackofficeContext(exchange, partyId, contractId, null)
+            .flatMap(context -> {
+                // Log to SLF4J (included)
+                logImpersonationOperation(context, "getAccounts");
+                
+                // Persist to database (your implementation)
+                auditService.logImpersonation(context, "getAccounts");
+                
+                return accountService.getAccounts(context);
+            });
+    }
+}
+```
 
 ## Testing
 
@@ -416,7 +506,7 @@ public class CustomBackofficeContextResolver extends AbstractBackofficeContextRe
 | **Authentication** | Customer JWT | Backoffice JWT + Istio |
 | **Context** | Single party | Dual (backoffice user + customer) |
 | **Impersonation** | ❌ No | ✅ Yes |
-| **Audit Trail** | Basic | Comprehensive |
+| **Logging** | Basic | Structured impersonation logs |
 | **Roles** | Customer roles | Backoffice + customer roles |
 | **Use Case** | Customer-facing APIs | Internal admin tools |
 
