@@ -76,7 +76,70 @@ implementation 'com.firefly:lib-common-backoffice:1.0.0-SNAPSHOT'
 
 The library auto-configures through Spring Boot. Simply add the dependency and it will automatically register the `DefaultBackofficeContextResolver` component.
 
-### Controller Example
+### Abstract Controllers
+
+The library provides two abstract base controllers to simplify development:
+
+#### 1. AbstractBackofficeController
+
+For **administrative endpoints** that don't require customer impersonation:
+
+```java
+@RestController
+@RequestMapping("/backoffice/api/v1/reports")
+public class ReportsController extends AbstractBackofficeController {
+    
+    @Autowired
+    private ReportsService reportsService;
+    
+    @GetMapping("/daily-summary")
+    public Mono<DailySummaryResponse> getDailySummary(ServerWebExchange exchange) {
+        logOperation(exchange, "getDailySummary");
+        return reportsService.generateDailySummary();
+    }
+}
+```
+
+**Features:**
+- Automatic backoffice user extraction
+- Audit logging
+- No customer impersonation
+
+#### 2. AbstractBackofficeResourceController
+
+For **customer resource endpoints** with impersonation:
+
+```java
+@RestController
+@RequestMapping("/backoffice/api/v1/customers/{partyId}/contracts/{contractId}")
+public class BackofficeAccountController extends AbstractBackofficeResourceController {
+    
+    @Autowired
+    private AccountService accountService;
+    
+    @GetMapping("/accounts")
+    public Mono<List<AccountDTO>> getCustomerAccounts(
+            @PathVariable UUID partyId,
+            @PathVariable UUID contractId,
+            ServerWebExchange exchange) {
+        
+        return resolveBackofficeContext(exchange, partyId, contractId, null)
+            .flatMap(context -> {
+                logImpersonationOperation(context, "getCustomerAccounts");
+                return accountService.getAccountsForCustomer(context);
+            });
+    }
+}
+```
+
+**Features:**
+- Full context resolution (backoffice user + customer)
+- Automatic party ID validation
+- Customer access rights verification
+- Comprehensive audit logging
+- Permission and role checking helpers
+
+### Manual Controller Example (Without Abstract Base)
 
 ```java
 @RestController
